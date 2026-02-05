@@ -1,19 +1,74 @@
+// API base (local dev). Change if deploying to a different host.
+const API_BASE = 'http://localhost:3000/api';
 // Cheesecake Product Price
 const PRODUCT_PRICE = 25.00;
 const REVIEWS_STORAGE_KEY = 'gleejeyly_reviews';
 
-// Reviews storage (persisted with localStorage)
-let reviews = loadReviewsFromStorage();
+// Reviews - try API first, fallback to localStorage
+let reviews = [];
 
-// Load reviews from localStorage
 function loadReviewsFromStorage() {
     const stored = localStorage.getItem(REVIEWS_STORAGE_KEY);
     return stored ? JSON.parse(stored) : [];
 }
 
-// Save reviews to localStorage
 function saveReviewsToStorage() {
-    localStorage.setItem(REVIEWS_STORAGE_KEY, JSON.stringify(reviews));
+    try {
+        localStorage.setItem(REVIEWS_STORAGE_KEY, JSON.stringify(reviews));
+    } catch (e) {
+        // ignore
+    }
+}
+
+async function loadReviews() {
+    // Try API
+    try {
+        const res = await fetch(`${API_BASE}/reviews`, { method: 'GET' });
+        if (res.ok) {
+            reviews = await res.json();
+            // Mirror to localStorage for offline
+            saveReviewsToStorage();
+            displayReviews();
+            return;
+        }
+    } catch (e) {
+        // network error -> fallback
+    }
+
+    // Fallback
+    reviews = loadReviewsFromStorage();
+    displayReviews();
+}
+
+// Utility: escape HTML to prevent injection
+function escapeHTML(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+async function saveReviewToAPI(review) {
+    try {
+        const res = await fetch(`${API_BASE}/reviews`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(review)
+        });
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.reviews) {
+                reviews = data.reviews;
+            }
+            saveReviewsToStorage();
+            return true;
+        }
+    } catch (e) {
+        // ignore
+    }
+    return false;
 }
 
 // Wait for DOM to be fully loaded
@@ -22,24 +77,29 @@ document.addEventListener('DOMContentLoaded', function() {
     initFAQ();
     initOrderForm();
     initReviewForm();
+    // Load reviews after review form is initialized
+    loadReviews();
 });
 
 // 1. Navigation Manager
 function initNavigation() {
     const mobileMenuBtn = document.querySelector('.mobile-menu-btn');
+    const nav = document.querySelector('nav');
     const navMenu = document.querySelector('nav ul');
     
-    if (!mobileMenuBtn || !navMenu) return;
+    if (!mobileMenuBtn || !nav || !navMenu) return;
     
     // Mobile menu toggle
     mobileMenuBtn.addEventListener('click', () => {
-        navMenu.classList.toggle('show');
+        nav.classList.toggle('show');
+        mobileMenuBtn.setAttribute('aria-expanded', nav.classList.contains('show'));
     });
     
     // Close menu when clicking on a link
     document.querySelectorAll('nav ul li a').forEach(link => {
         link.addEventListener('click', () => {
-            navMenu.classList.remove('show');
+            nav.classList.remove('show');
+            mobileMenuBtn.setAttribute('aria-expanded', 'false');
         });
     });
     
@@ -52,7 +112,8 @@ function initNavigation() {
             
             const targetElement = document.querySelector(targetId);
             if (targetElement) {
-                navMenu.classList.remove('show');
+                nav.classList.remove('show');
+                mobileMenuBtn.setAttribute('aria-expanded', 'false');
                 window.scrollTo({
                     top: targetElement.offsetTop - 80,
                     behavior: 'smooth'
@@ -163,26 +224,48 @@ function initOrderForm() {
     }
     
     // Form submission
-    orderForm.addEventListener('submit', function(e) {
+    orderForm.addEventListener('submit', async function(e) {
         e.preventDefault();
-        
+
         if (validateForm()) {
-            // Prepare message for WhatsApp or Messenger
+            // Prepare order data
             const fullName = document.getElementById('fullName').value;
             const phoneNumber = document.getElementById('phoneNumber').value;
             const facebook = document.getElementById('facebook').value;
             const pickupDate = document.getElementById('pickupDate').value;
-            const quantity = document.getElementById('quantityValue').value;
-            const total = PRODUCT_PRICE * parseInt(quantity);
-            
+            const quantity = parseInt(document.getElementById('quantityValue').value) || 1;
+            const total = PRODUCT_PRICE * quantity;
+
+            const order = {
+                fullName,
+                phoneNumber,
+                facebook,
+                pickupDate,
+                quantity,
+                total,
+                createdAt: new Date().toISOString()
+            };
+
+            // Try to save order to API (best-effort)
+            try {
+                await fetch(`${API_BASE}/orders`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(order)
+                });
+            } catch (e) {
+                // ignore API errors; proceed with existing flow
+            }
+
+            // Prepare message for WhatsApp or Messenger
             const message = `Order from ${fullName}%0APhone: ${phoneNumber}%0AFacebook: ${facebook}%0APickup Date: ${pickupDate}%0AQuantity: ${quantity} pcs%0ATotal: ₱${total}`;
-            
+
             // Show success modal
             showSuccessModal();
-            
+
             // Reset form
             orderForm.reset();
-            
+
             // Redirect to WhatsApp after a delay
             setTimeout(() => {
                 window.location.href = `https://wa.me/639123456789?text=${message}`;
@@ -198,6 +281,9 @@ function initOrderForm() {
             }
         }
     });
+
+    // Initialize summary display on load
+    updateOrderSummary();
 }
 
 function updateOrderSummary() {
@@ -292,17 +378,17 @@ function showSuccessModal() {
     if (modal) {
         modal.classList.add('show');
         
-        // Close modal when clicking the button
+        // Close modal when clicking the button (listen once to avoid duplicates)
         if (closeBtn) {
-            closeBtn.addEventListener('click', closeSuccessModal);
+            closeBtn.addEventListener('click', closeSuccessModal, { once: true });
         }
         
-        // Close modal when clicking outside
-        modal.addEventListener('click', (e) => {
+        // Close modal when clicking outside (listen once)
+        modal.addEventListener('click', function onClickOutside(e) {
             if (e.target === modal) {
                 closeSuccessModal();
             }
-        });
+        }, { once: true });
     }
 }
 
@@ -361,7 +447,7 @@ function initReviewForm() {
     });
 
     // Form submission
-    reviewForm.addEventListener('submit', function(e) {
+    reviewForm.addEventListener('submit', async function(e) {
         e.preventDefault();
 
         if (validateReviewForm()) {
@@ -382,11 +468,12 @@ function initReviewForm() {
                 date: new Date().toLocaleDateString()
             };
 
-            // Add review to array
-            reviews.unshift(review);
-
-            // Save reviews to localStorage
-            saveReviewsToStorage();
+            // Try saving to API, fallback to localStorage
+            const saved = await saveReviewToAPI(review);
+            if (!saved) {
+                reviews.unshift(review);
+                saveReviewsToStorage();
+            }
 
             // Display the review
             displayReviews();
@@ -523,16 +610,28 @@ function displayReviews() {
         return;
     }
 
-    reviewsList.innerHTML = reviews.map(review => `
+    reviewsList.innerHTML = reviews.map(review => {
+        const safeName = escapeHTML(review.name);
+        const safeComment = escapeHTML(review.comment);
+
+        const productStars = Array(5).fill(0).map((_, i) => {
+            return `<i class="${i < review.productRating ? 'fas fa-star' : 'far fa-star'}"></i>`;
+        }).join('');
+
+        const serviceStars = Array(5).fill(0).map((_, i) => {
+            return `<i class="${i < review.serviceRating ? 'fas fa-star' : 'far fa-star'}"></i>`;
+        }).join('');
+
+        return `
         <div class="review-item">
             <div class="review-header">
-                <span class="review-name">${review.name}</span>
+                <span class="review-name">${safeName}</span>
             </div>
             <div>
                 <span class="review-label">Product Rating:</span>
                 <div class="review-rating-display">
                     <div class="review-rating">
-                        ${Array(5).fill(0).map((_, i) => `<i class="fas fa-star${i < review.productRating ? '' : ' fa-star'}"></i>`).join('')}
+                        ${productStars}
                     </div>
                     <span class="rating-value">${review.productRating}/5</span>
                 </div>
@@ -541,13 +640,14 @@ function displayReviews() {
                 <span class="review-label">Service Rating:</span>
                 <div class="review-rating-display">
                     <div class="review-rating">
-                        ${Array(5).fill(0).map((_, i) => `<i class="fas fa-star${i < review.serviceRating ? '' : ' fa-star'}"></i>`).join('')}
+                        ${serviceStars}
                     </div>
                     <span class="rating-value">${review.serviceRating}/5</span>
                 </div>
             </div>
-            <p class="review-comment">"${review.comment}"</p>
+            <p class="review-comment">"${safeComment}"</p>
             <p class="review-date">${review.date}</p>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
